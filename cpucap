@@ -1,15 +1,23 @@
 #!/bin/bash
-# cpucap — cap CPU speed to control heat (intel_pstate).
+# cpucap — cap CPU speed and power to control heat (intel_pstate + RAPL).
 # Usage: sudo cpucap cool|quiet|normal|full|status
 P=/sys/devices/system/cpu/intel_pstate
+R=/sys/class/powercap/intel-rapl:0
+SAVE=/run/cpucap-rapl-defaults   # firmware PL1/PL2, saved before first change (RAPL resets at boot)
 set_cap(){ echo "$1" > $P/no_turbo; echo "$2" > $P/max_perf_pct; }
+set_power(){ # $1=PL1 W (sustained), $2=PL2 W (burst); "default" restores firmware values
+  [ -w $R/constraint_0_power_limit_uw ] || return 0
+  [ -f $SAVE ] || echo "$(cat $R/constraint_0_power_limit_uw) $(cat $R/constraint_1_power_limit_uw)" > $SAVE
+  if [ "$1" = default ]; then read -r pl1 pl2 < $SAVE; else pl1=$(( $1*1000000 )); pl2=$(( $2*1000000 )); fi
+  echo "$pl2" > $R/constraint_1_power_limit_uw; echo "$pl1" > $R/constraint_0_power_limit_uw
+}
 case "$1" in
-  cool)   set_cap 1 60 ;;   # no turbo, ~3.2 GHz max — big heat drop, still snappy
-  quiet)  set_cap 1 45 ;;   # no turbo, ~2.4 GHz max — coolest/quietest
-  normal) set_cap 1 100 ;;  # no turbo, base clocks uncapped
-  full)   set_cap 0 100 ;;  # stock: turbo to 5.3 GHz
+  cool)   set_cap 1 60;  set_power 45 65 ;;     # no turbo, ~3.2 GHz, 45 W sustained — big heat drop
+  quiet)  set_cap 1 45;  set_power 30 40 ;;     # no turbo, ~2.4 GHz, 30 W — coolest/quietest
+  normal) set_cap 1 100; set_power 65 90 ;;     # no turbo, uncapped clocks, 65 W
+  full)   set_cap 0 100; set_power default ;;   # stock: turbo to 5.3 GHz, firmware power limits
   status|"") ;;
   *) echo "usage: sudo cpucap cool|quiet|normal|full|status"; exit 1 ;;
 esac
-echo "turbo: $([ "$(cat $P/no_turbo)" = 1 ] && echo off || echo on)   max_perf: $(cat $P/max_perf_pct)%"
+echo "turbo: $([ "$(cat $P/no_turbo)" = 1 ] && echo off || echo on)   max_perf: $(cat $P/max_perf_pct)%   power limit: $(( $(cat $R/constraint_0_power_limit_uw)/1000000 ))W sustained / $(( $(cat $R/constraint_1_power_limit_uw)/1000000 ))W burst"
 echo "CPU temp: $(( $(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1)/1000 ))°C   avg clock: $(awk '/MHz/{s+=$4;n++} END{printf "%.0f", s/n}' /proc/cpuinfo) MHz"
